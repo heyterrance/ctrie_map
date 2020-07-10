@@ -1,10 +1,10 @@
 # Compile-time Trie Map
-A map backed by a fixed sized arary, indexed by a compile-time trie.
+A map backed by a `std::array`, indexed by a compile-time trie.
 
 ## Features
 * Header-only
 * Fully `constexpr`
-* _Telchnicaly_ more useful than [ctrie](https://github.com/heyterrance/ctrie)
+* _Technically_ more useful than [ctrie](https://github.com/heyterrance/ctrie)
 
 ## Usage
 
@@ -55,8 +55,8 @@ static_assert(m.has_default());
 static_assert(m["???"] == 0xBEEF);
 ```
 
-## Peformance
+## Performance
 Yes 
 
-## Depndencies
+## Dependencies
 * C++17
