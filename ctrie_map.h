@@ -1,9 +1,10 @@
 #pragma once
 
-#include <string_view>
+#include <algorithm>
 #include <array>
-#include <utility>
+#include <string_view>
 #include <tuple>
+#include <utility>
 
 namespace ctrie {
 
@@ -27,13 +28,6 @@ constexpr struct default_key_t {
     }
 } default_key{};
 
-namespace literals {
-
-template<typename T, T... Ks>
-constexpr insert_key<Ks...> operator""_key() { return {}; }
-
-} // namespace literals
-
 namespace detail {
 
 template<char K, typename Node> class entry;
@@ -42,32 +36,27 @@ template<typename FoundEntry, typename... RemainingEntries> struct found_tag { }
 struct not_found_tag { };
 
 template<typename... RemainingEntries>
-struct search_record {
+struct find_record {
     template<typename Entry>
-    constexpr search_record<RemainingEntries..., Entry> operator+(Entry) const { return {}; }
+    constexpr find_record<RemainingEntries..., Entry> operator+(Entry) const { return {}; }
 
     template<typename Entry>
     static constexpr found_tag<Entry, RemainingEntries...> found(Entry) { return {}; }
 };
 
 template<char K, typename... Searched>
-constexpr not_found_tag find_entry_impl(search_record<Searched...>) { return {}; }
+constexpr not_found_tag find_entry_impl(find_record<Searched...>) { return {}; }
 
-template<char K, char K0, typename Node0, typename... Entries, typename... Searched>
-constexpr auto find_entry_impl(
-    search_record<Searched...> rec,
-    entry<K0, Node0> e, Entries... es)
+template<char K, typename Entry, typename... Entries, typename... Searched>
+constexpr auto find_entry_impl(find_record<Searched...> rec, Entry e, Entries... es)
 {
-    using result_t = std::conditional_t<
-        K == K0,
-        decltype((rec + ... + es).found(e)),
-        decltype(find_entry_impl<K>(rec + e, es...))
-    >;
-    return result_t{};
+    constexpr auto match = (rec + ... + es).found(e);
+    constexpr auto recurse = find_entry_impl<K>(rec + e, es...);
+    return std::conditional_t<e.matches(K), decltype(match), decltype(recurse)>{};
 }
 
 template<char K, typename... Entries>
-constexpr auto find_entry(Entries... es) { return find_entry_impl<K>(search_record<>{}, es...); }
+constexpr auto find_entry(Entries... es) { return find_entry_impl<K>(find_record<>{}, es...); }
 
 template<typename>
 constexpr int size_until() { return 0; }
@@ -106,11 +95,23 @@ class entry {
 public:
     static constexpr bool is_leaf() { return false; }
     static constexpr bool is_default() { return false; }
+    static constexpr auto min_match_length() { return std::size_t{1} + Node::min_match_length(); }
+    static constexpr auto max_match_length() { return std::size_t{1} + Node::max_match_length(); }
 
     static constexpr bool matches(char c) { return c == K; }
     static constexpr int size() { return Node::size(); }
-    static constexpr int end() { return size(); }
-    static constexpr int find(std::string_view s) { return Node::find(s); }
+    static constexpr int end() { return Node::end(); }
+    static constexpr int find(std::string_view s)
+    {
+        s.remove_prefix(1);
+        return Node::find(s);
+    }
+
+    static constexpr bool contains(std::string_view s)
+    {
+        s.remove_prefix(1);
+        return Node::contains(s);
+    }
 
     template<char... Ks>
     static constexpr auto insert(insert_key<Ks...> k)
@@ -120,34 +121,38 @@ public:
     }
 };
 
+struct null_entry {
+    static constexpr bool is_leaf() { return false; }
+    static constexpr bool is_default() { return false; }
+    static constexpr bool matches(char) { return false; }
+    static constexpr int find(std::string_view) { return 0; }
+    static constexpr bool contains(std::string_view) { return false; }
+    static constexpr int size() { return 0; }
+    static constexpr int end() { return 0; }
+    static constexpr auto min_match_length() { return std::numeric_limits<std::size_t>::max(); }
+    static constexpr auto max_match_length() { return std::numeric_limits<std::size_t>::min(); }
+};
+
 struct leaf_node;
 struct default_node;
 
 template<>
-class entry<0, leaf_node> {
+class entry<0, leaf_node> : public null_entry {
 public:
     static constexpr bool is_leaf() { return true; }
-    static constexpr bool is_default() { return false; }
-    static constexpr bool matches(char) { return false; }
-    static constexpr int find(std::string_view) { return 0; }
+    static constexpr bool contains(std::string_view) { return true; }
     static constexpr int size() { return 1; }
     static constexpr int end() { return 1; }
 };
 
 template<>
-class entry<0, default_node> {
+class entry<0, default_node> : public null_entry {
 public:
-    static constexpr bool is_leaf() { return false; }
     static constexpr bool is_default() { return true; }
-    static constexpr bool matches(char) { return false; }
-    static constexpr int find(std::string_view) { return 0; }
-    static constexpr int size() { return 0; }
-    static constexpr int end() { return 0; }
 };
 
 using leaf_entry = entry<0, leaf_node>;
 using default_entry = entry<0, default_node>;
-
 
 } // namespace detail
 
@@ -156,6 +161,8 @@ class index_node {
 public:
     static constexpr bool has_leaf() { return (Entries::is_leaf() || ...); }
     static constexpr bool has_default() { return (Entries::is_default() || ...); }
+    static constexpr auto min_match_length() { return std::min<std::size_t>({Entries::min_match_length()..., 0}); }
+    static constexpr auto max_match_length() { return std::max<std::size_t>({Entries::max_match_length()..., 0}); }
 
     template<char... Ks>
     constexpr auto operator<<(insert_key<Ks...> k) const { return insert(k); }
@@ -183,21 +190,36 @@ public:
     static constexpr int capacity() { return size() + static_cast<int>(has_default()); }
     static constexpr int end() { return size(); }
 
-    static constexpr bool contains(std::string_view s) { return find(s) != end(); }
+    static constexpr bool contains(std::string_view s)
+    {
+        if (s.empty()) {
+            return has_leaf();
+        }
+
+        if (s.length() < min_match_length() || s.length() > max_match_length()) {
+            return false;
+        }
+
+        char c = s.front();
+        return ((Entries::matches(c) && Entries::contains(s)) || ...);
+    }
 
     static constexpr int find(std::string_view s)
     {
-        if (!s.empty()) {
-            int result{end()};
-            char c = s.front();
-            ((Entries::matches(c) && ((result = call_find<Entries>(s.substr(1))), true)) || ...);
-            return result;
+        if (s.empty()) {
+            if constexpr (has_leaf())
+                return call_find<detail::leaf_entry>({});
+            return end();
         }
 
-        if constexpr (has_leaf()) {
-            return call_find<detail::leaf_entry>({});
+        if (s.length() < min_match_length() || s.length() > max_match_length()) {
+            return end();
         }
-        return end();
+
+        int result{end()};
+        char c = s.front();
+        ((Entries::matches(c) && (result = call_find<Entries>(s), true)) || ...);
+        return result;
     }
 
     template<char... Ks>
@@ -217,11 +239,10 @@ private:
     template<typename Entry>
     static constexpr int call_find(std::string_view s)
     {
-        auto idx = Entry::find(s);
-        if (idx == Entry::end()) {
-            return end();
+        if (auto idx = Entry::find(s); idx != Entry::end()) {
+            return idx + detail::size_until<Entry>(Entries{}...);
         }
-        return idx + detail::size_until<Entry>(Entries{}...);
+        return end();
     }
 
     template<char K, char... Ks, typename Found, typename... Remaining>
@@ -243,6 +264,7 @@ template<typename T, typename IndexTrie>
 class array_map
 {
 public:
+    using index_trie_type = IndexTrie;
     using array_type = std::array<T, IndexTrie::capacity()>;
     using size_type = typename array_type::size_type;
     using value_type = typename array_type::value_type;
@@ -266,6 +288,7 @@ public:
     constexpr reference operator[](size_type pos) { return _data[pos]; }
     constexpr const_reference operator[](size_type pos) const { return _data[pos]; }
 
+    static constexpr bool contains(std::string_view s) { return IndexTrie::contains(s); }
     constexpr iterator find(std::string_view s) { return std::next(std::begin(_data), index_of(s)); }
     constexpr const_iterator find(std::string_view s) const { return std::next(std::begin(_data), index_of(s)); }
 
@@ -301,5 +324,13 @@ constexpr auto build_map(insert_key<Ks...> key, InsertKeys... keys)
     constexpr auto index_trie = build_index(key, keys...);
     return array_map<T, decltype(index_trie)>{};
 }
+
+namespace literals {
+
+template<typename T, T... Ks>
+constexpr insert_key<Ks...> operator""_key() { return {}; }
+
+} // namespace literals
+
 
 } // namespace ctrie
